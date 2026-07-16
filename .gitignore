@@ -1,0 +1,14 @@
+# Compiled binaries
+relay
+serve
+handoff-relay
+handoff-serve
+*.sqlite
+*.db
+
+# Logs
+*.log
+/tmp/
+
+# Go build cache
+/vendor/
