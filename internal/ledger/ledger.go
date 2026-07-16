@@ -85,11 +85,19 @@ func (l *Ledger) Settle(jobID, consumerHash, providerHash string, tokens int64) 
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(
-		`UPDATE accounts SET balance = balance - ?, spent = spent + ? WHERE token_hash = ?`,
-		tokens, tokens, consumerHash)
+	res, err := tx.Exec(
+		`UPDATE accounts SET balance = balance - ?, spent = spent + ?
+		 WHERE token_hash = ? AND balance >= ?`,
+		tokens, tokens, consumerHash, tokens)
 	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		prefix := consumerHash
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		return fmt.Errorf("insufficient credits: cannot debit %d tokens from %s", tokens, prefix)
 	}
 	_, err = tx.Exec(
 		`UPDATE accounts SET balance = balance + ?, earned = earned + ? WHERE token_hash = ?`,
@@ -105,6 +113,16 @@ func (l *Ledger) Settle(jobID, consumerHash, providerHash string, tokens int64) 
 		return err
 	}
 	return tx.Commit()
+}
+
+// JobConsumer returns the consumer_hash for the given job, or ("", nil) if not found.
+func (l *Ledger) JobConsumer(jobID string) (string, error) {
+	var h string
+	err := l.db.QueryRow(`SELECT consumer_hash FROM jobs WHERE job_id = ?`, jobID).Scan(&h)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return h, err
 }
 
 // Rate records a consumer rating (1–5) for a job.

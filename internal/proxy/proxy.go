@@ -67,6 +67,9 @@ func ProxyToOllama(ctx context.Context, ollamaURL string, body map[string]any, c
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 64<<20))
+	// Default token size is 64 KB which silently truncates long NDJSON lines.
+	// 4 MB covers even large vision/tool-call responses.
+	scanner.Buffer(make([]byte, 1<<20), 4<<20)
 	var evalCount int64
 	for scanner.Scan() {
 		line := scanner.Bytes()

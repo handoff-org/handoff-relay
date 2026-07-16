@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+
 // Provider represents a connected provider node.
 type Provider struct {
 	ID      string          // token SHA-256 hex (never the raw token)
@@ -26,15 +27,17 @@ func (p *Provider) Send(msg any) error {
 
 // Registry maps model tags to a pool of available providers.
 type Registry struct {
-	mu        sync.RWMutex
-	byModel   map[string][]*Provider // model → []Provider
-	byID      map[string]*Provider   // providerID → Provider
+	mu      sync.RWMutex
+	byModel map[string][]*Provider // model → []Provider
+	byID    map[string]*Provider   // providerID → Provider
+	rr      map[string]uint64      // per-model round-robin counter
 }
 
 func New() *Registry {
 	return &Registry{
 		byModel: make(map[string][]*Provider),
 		byID:    make(map[string]*Provider),
+		rr:      make(map[string]uint64),
 	}
 }
 
@@ -71,16 +74,17 @@ func (r *Registry) Unregister(id string) {
 	}
 }
 
-// Pick returns an available provider for the given model, or nil if none.
-// Simple round-robin for now; latency-based selection is a Phase 2 improvement.
+// Pick returns an available provider for the given model using round-robin, or nil if none.
 func (r *Registry) Pick(model string) *Provider {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	pool := r.byModel[model]
 	if len(pool) == 0 {
 		return nil
 	}
-	return pool[0] // TODO: rotate or latency-rank
+	idx := r.rr[model] % uint64(len(pool))
+	r.rr[model]++
+	return pool[idx]
 }
 
 // Count returns the number of providers serving a given model.

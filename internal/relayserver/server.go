@@ -274,6 +274,13 @@ func (s *Server) handleRating(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	callerHash := tokenHash(strings.TrimPrefix(auth, "Bearer "))
+
 	var req struct {
 		JobID  string `json:"jobId"`
 		Rating int    `json:"rating"`
@@ -282,6 +289,22 @@ func (s *Server) handleRating(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+
+	// Verify the caller is the consumer of this job (prevents rating-stuffing by providers).
+	consumer, err := s.ledger.JobConsumer(req.JobID)
+	if err != nil {
+		http.Error(w, "ledger error", http.StatusInternalServerError)
+		return
+	}
+	if consumer == "" {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+	if consumer != callerHash {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	_ = s.ledger.Rate(req.JobID, req.Rating)
 	w.WriteHeader(http.StatusNoContent)
 }

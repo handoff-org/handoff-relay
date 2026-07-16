@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
@@ -298,6 +299,16 @@ func runLoop(ctx context.Context, token, relayAddr, ollamaURL, gpuType string, s
 	}
 	log.Printf("connected to relay  models=%v  balance=%d", models, ack.Balance)
 
+	// writeMu guards concurrent writes — WebSocket connections are not safe for
+	// concurrent writers. The heartbeat ticker and job goroutines both write, so
+	// all sends must go through writeConn.
+	var writeMu sync.Mutex
+	writeConn := func(v any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(v)
+	}
+
 	// Heartbeat ticker.
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -323,7 +334,7 @@ func runLoop(ctx context.Context, token, relayAddr, ollamaURL, gpuType string, s
 		case err := <-connErr:
 			return err
 		case <-ticker.C:
-			_ = conn.WriteJSON(protocol.ProviderHeartbeat{Type: "heartbeat"})
+			_ = writeConn(protocol.ProviderHeartbeat{Type: "heartbeat"})
 		case msg := <-msgCh:
 			var base struct {
 				Type  string         `json:"type"`
@@ -334,7 +345,7 @@ func runLoop(ctx context.Context, token, relayAddr, ollamaURL, gpuType string, s
 				continue
 			}
 			if !isIdle() {
-				_ = conn.WriteJSON(protocol.JobReject{
+				_ = writeConn(protocol.JobReject{
 					Type:   "reject",
 					JobID:  base.JobID,
 					Reason: "busy",
@@ -345,11 +356,11 @@ func runLoop(ctx context.Context, token, relayAddr, ollamaURL, gpuType string, s
 			case <-sem:
 				go func(jobID string, body map[string]any) {
 					defer func() { sem <- struct{}{} }()
-					handleJob(ctx, conn, jobID, body, ollamaURL)
+					handleJob(ctx, writeConn, jobID, body, ollamaURL)
 				}(base.JobID, base.Body)
 			default:
 				// All slots full.
-				_ = conn.WriteJSON(protocol.JobReject{
+				_ = writeConn(protocol.JobReject{
 					Type:   "reject",
 					JobID:  base.JobID,
 					Reason: "busy",
@@ -359,7 +370,7 @@ func runLoop(ctx context.Context, token, relayAddr, ollamaURL, gpuType string, s
 	}
 }
 
-func handleJob(ctx context.Context, conn *websocket.Conn, jobID string, body map[string]any, ollamaURL string) {
+func handleJob(ctx context.Context, writeConn func(any) error, jobID string, body map[string]any, ollamaURL string) {
 	ch := make(chan []byte, 64)
 	jobCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -379,9 +390,8 @@ func handleJob(ctx context.Context, conn *websocket.Conn, jobID string, body map
 			JobID: jobID,
 			Data:  string(line),
 		}
-		// Check if this is the final done message.
 		chunk.Done = isDone(line)
-		if err := sendChunk(conn, chunk); err != nil {
+		if err := sendChunk(writeConn, chunk); err != nil {
 			log.Printf("job %s: send chunk: %v", jobID[:8], err)
 			return
 		}
@@ -390,7 +400,7 @@ func handleJob(ctx context.Context, conn *websocket.Conn, jobID string, body map
 		}
 	}
 	// Channel closed without a done frame (e.g. Ollama error) — send a synthetic done.
-	_ = sendChunk(conn, protocol.JobChunk{Type: "chunk", JobID: jobID, Data: "", Done: true})
+	_ = sendChunk(writeConn, protocol.JobChunk{Type: "chunk", JobID: jobID, Data: "", Done: true})
 }
 
 func isDone(line []byte) bool {
@@ -401,9 +411,8 @@ func isDone(line []byte) bool {
 	return obj.Done
 }
 
-func sendChunk(conn *websocket.Conn, chunk protocol.JobChunk) error {
-	// Use the Provider.Send mutex pattern via a local lock.
-	return conn.WriteJSON(chunk)
+func sendChunk(writeConn func(any) error, chunk protocol.JobChunk) error {
+	return writeConn(chunk)
 }
 
 func detectGPU() string {

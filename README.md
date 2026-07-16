@@ -18,7 +18,7 @@ go build -o relay ./cmd/relay
 go build -o serve ./cmd/serve
 ```
 
-Requires Go 1.22+ and CGO (for SQLite).
+Requires Go 1.26+ and CGO (for SQLite).
 
 ## Usage
 
