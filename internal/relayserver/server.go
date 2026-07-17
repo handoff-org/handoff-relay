@@ -35,6 +35,9 @@ type Server struct {
 	ledger      *ledger.Ledger
 	jobMu       sync.RWMutex
 	jobChannels map[string]chan []byte
+	// provJobsMu guards provJobs; always acquired BEFORE jobMu when both are needed.
+	provJobsMu sync.Mutex
+	provJobs   map[string][]string // providerID -> []jobID in-flight
 }
 
 // New creates a relay server backed by the given registry and ledger.
@@ -43,6 +46,7 @@ func New(reg *registry.Registry, l *ledger.Ledger) *Server {
 		reg:         reg,
 		ledger:      l,
 		jobChannels: make(map[string]chan []byte),
+		provJobs:    make(map[string][]string),
 	}
 }
 
@@ -99,6 +103,19 @@ func (s *Server) handleProviderWS(w http.ResponseWriter, r *http.Request) {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("provider %s disconnected: %v", hash[:8], err)
+			// Close any in-flight job channels so consumers aren't left hanging.
+			s.provJobsMu.Lock()
+			jobs := append([]string{}, s.provJobs[hash]...)
+			delete(s.provJobs, hash)
+			s.provJobsMu.Unlock()
+			s.jobMu.Lock()
+			for _, jid := range jobs {
+				if ch := s.jobChannels[jid]; ch != nil {
+					close(ch)
+					delete(s.jobChannels, jid)
+				}
+			}
+			s.jobMu.Unlock()
 			return
 		}
 		var base struct {
@@ -200,6 +217,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.jobMu.Unlock()
 		return
 	}
+	// Track the job under this provider so a disconnect can close the channel.
+	s.provJobsMu.Lock()
+	s.provJobs[provider.ID] = append(s.provJobs[provider.ID], jobID)
+	s.provJobsMu.Unlock()
 
 	flusher, canFlush := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/x-ndjson")

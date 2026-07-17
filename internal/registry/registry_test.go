@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -105,5 +107,52 @@ func TestCount_ZeroForUnknownModel(t *testing.T) {
 	r := New()
 	if r.Count("no-model") != 0 {
 		t.Error("Count for unknown model should be 0")
+	}
+}
+
+// ── Concurrency ───────────────────────────────────────────────────────────────
+
+func TestRegistry_ConcurrentAccessIsRaceFree(t *testing.T) {
+	r := New()
+	var wg sync.WaitGroup
+	const n = 50
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("p%d", i)
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			r.Register(fakeProvider(id, "llama3"))
+		}()
+		go func() {
+			defer wg.Done()
+			r.Pick("llama3")
+		}()
+		go func() {
+			defer wg.Done()
+			r.Unregister(id)
+		}()
+	}
+	wg.Wait()
+	// Pass just means no data race detected by -race; final count is non-deterministic.
+}
+
+func TestPick_RoundRobinDistributesEvenly(t *testing.T) {
+	r := New()
+	r.Register(fakeProvider("p1", "llama3"))
+	r.Register(fakeProvider("p2", "llama3"))
+	r.Register(fakeProvider("p3", "llama3"))
+
+	seen := map[string]int{}
+	for i := 0; i < 9; i++ {
+		p := r.Pick("llama3")
+		if p == nil {
+			t.Fatal("Pick returned nil")
+		}
+		seen[p.ID]++
+	}
+	for _, id := range []string{"p1", "p2", "p3"} {
+		if seen[id] != 3 {
+			t.Errorf("provider %s picked %d times, want 3 (round-robin)", id, seen[id])
+		}
 	}
 }

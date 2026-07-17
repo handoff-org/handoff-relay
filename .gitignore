@@ -1,8 +1,8 @@
-# Compiled binaries
-relay
-serve
-handoff-relay
-handoff-serve
+# Compiled binaries (root-level only)
+/relay
+/serve
+/handoff-relay
+/handoff-serve
 *.sqlite
 *.db
 

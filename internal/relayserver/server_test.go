@@ -1,7 +1,9 @@
 package relayserver_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -274,5 +276,55 @@ func TestRating_UnknownJobReturnsNotFound(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (unknown job)", resp.StatusCode)
+	}
+}
+
+// ── /ollama/api/chat — credit exhaustion ──────────────────────────────────────
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", h)
+}
+
+func TestChat_InsufficientCreditsReturns402(t *testing.T) {
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	reg := registry.New()
+	// Inject a fake provider so Pick succeeds; the balance check runs next.
+	reg.Register(&registry.Provider{ID: "fake-prov", Models: []string{"llama3"}})
+	ts := httptest.NewServer(relayserver.New(reg, l).Handler())
+	defer ts.Close()
+
+	// Register a consumer — gets the signup bonus.
+	regResp, err := http.Post(ts.URL+"/register", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /register: %v", err)
+	}
+	var regBody map[string]any
+	_ = json.NewDecoder(regResp.Body).Decode(&regBody)
+	regResp.Body.Close()
+	token, _ := regBody["token"].(string)
+
+	// Drain the consumer's full balance via a direct ledger settle.
+	consumerHash := sha256Hex(token)
+	_, _, _, _ = l.Balance(consumerHash)
+	if err := l.Settle("drain-all", consumerHash, "fake-prov", ledger.SIGNUP_BONUS); err != nil {
+		t.Fatalf("drain settle: %v", err)
+	}
+
+	// Now the consumer has exactly 0 credits.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/ollama/api/chat",
+		strings.NewReader(`{"model":"llama3","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /ollama/api/chat: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("status = %d, want 402 (payment required)", resp.StatusCode)
 	}
 }
